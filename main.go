@@ -8,11 +8,16 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
+type Entry struct {
+	value string
+	expiresAt time.Time
+}
 type Store struct {
 	mu sync.RWMutex
-	data map[string]string
+	data map[string]Entry
 }
 
 type cmd struct {
@@ -46,14 +51,32 @@ func handleClient(conn net.Conn,store *Store){
 			response := fmt.Sprintf("$%d\r\n%s\r\n",len(msg),msg)
 			conn.Write([]byte(response))
 		}else if cmd.name == "SET" {
-			if len(cmd.args) != 2 {
+			if len(cmd.args) != 2 && len(cmd.args) !=4{
         		conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
         		continue
     		}
 			key := cmd.args[0]
 			value := cmd.args[1]
+			var expiresAt time.Time
+			if len(cmd.args) == 4 {
+			if strings.ToUpper(cmd.args[2]) != "EX" {
+				conn.Write([]byte("-ERR syntax error\r\n"))
+				continue
+			}
+
+			seconds, err := strconv.Atoi(cmd.args[3])
+			if err != nil || seconds <= 0 {
+				conn.Write([]byte("-ERR value is not an integer or out of range\r\n"))
+				continue
+			}
+
+			expiresAt = time.Now().Add(time.Duration(seconds) * time.Second)
+			}
 			store.mu.Lock()
-			store.data[key] = value
+			store.data[key] = Entry{
+				value: value,
+				expiresAt: expiresAt,
+			}
 			store.mu.Unlock()
 			conn.Write([]byte("+OK\r\n"))
 		} else if cmd.name == "GET" {
@@ -62,15 +85,26 @@ func handleClient(conn net.Conn,store *Store){
 				continue
 			}
 			key := cmd.args[0]
-			store.mu.RLock()
-			value, exists := store.data[key]
-			store.mu.RUnlock()
+			store.mu.Lock()
+			entry, exists := store.data[key]
 
 			if !exists {
+				store.mu.Unlock()
 				conn.Write([]byte("$-1\r\n"))
-			} else {
-				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(value), value)))
+				continue
+
 			}
+
+			if !entry.expiresAt.IsZero() && time.Now().After(entry.expiresAt){
+				delete(store.data,key)
+				store.mu.Unlock()
+				conn.Write([]byte("$-1\r\n"))
+				continue
+			}
+
+			store.mu.Unlock()
+
+			conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(entry.value), entry.value)))
 		}else if cmd.name == "DEL" {
 			if len(cmd.args) < 0 {
 				conn.Write([]byte("-ERR wrong number of arguments for 'del' command\r\n"))
@@ -152,7 +186,7 @@ func main(){
 		return
 	}
 	defer listener.Close()
-	store:= &Store{data: make(map[string]string)}
+	store:= &Store{data: make(map[string]Entry)}
 	fmt.Println("Server running on :6739.....")
 	for {
 		conn,err:=listener.Accept()
