@@ -1,2 +1,5 @@
 *.exe
 dist/
+*.test
+*.out
+redis-mini

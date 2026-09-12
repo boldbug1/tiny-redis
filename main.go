@@ -15,6 +15,11 @@ type Store struct {
 	data map[string]string
 }
 
+type cmd struct {
+	name string
+	args []string
+}
+
 func handleClient(conn net.Conn,store *Store){
 	defer conn.Close();
 	reader:=bufio.NewReader(conn)
@@ -30,30 +35,60 @@ func handleClient(conn net.Conn,store *Store){
 			break
 		}
 
-		cmd:=strings.ToUpper(args[0])
-		if cmd == "PING"{
+		cmd:= cmd{
+			name: strings.ToUpper(args[0]),
+			args: args[1:],
+		}
+		if cmd.name == "PING"{
 			conn.Write([]byte("+PONG\r\n"))
-		}else if cmd == "ECHO"{
-			msg:= args[1]
+		}else if cmd.name == "ECHO"{
+			msg:= cmd.args[0]
 			response := fmt.Sprintf("$%d\r\n%s\r\n",len(msg),msg)
 			conn.Write([]byte(response))
-		}else if cmd == "SET" {
-			key := args[1]
-			value := args[2]
+		}else if cmd.name == "SET" {
+			if len(cmd.args) != 2 {
+        		conn.Write([]byte("-ERR wrong number of arguments for 'set' command\r\n"))
+        		continue
+    		}
+			key := cmd.args[0]
+			value := cmd.args[1]
 			store.mu.Lock()
 			store.data[key] = value
 			store.mu.Unlock()
 			conn.Write([]byte("+OK\r\n"))
-		}else if cmd== "GET" {
-			key:=args[1]
+		} else if cmd.name == "GET" {
+			if len(cmd.args) != 1 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'get' command\r\n"))
+				continue
+			}
+			key := cmd.args[0]
 			store.mu.RLock()
 			value, exists := store.data[key]
 			store.mu.RUnlock()
+
 			if !exists {
 				conn.Write([]byte("$-1\r\n"))
 			} else {
 				conn.Write([]byte(fmt.Sprintf("$%d\r\n%s\r\n", len(value), value)))
 			}
+		}else if cmd.name == "DEL" {
+			if len(cmd.args) < 0 {
+				conn.Write([]byte("-ERR wrong number of arguments for 'del' command\r\n"))
+				continue
+			}
+
+			deletedCount := 0
+
+			store.mu.Lock()
+			for _,key := range cmd.args {
+				if _,exists:=store.data[key];exists{
+					delete(store.data,key)
+					deletedCount++
+				}
+			}
+			store.mu.Unlock()
+			
+			conn.Write([]byte(fmt.Sprintf(":%d\r\n",deletedCount)))
 	}
 }
 }
