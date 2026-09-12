@@ -32,6 +32,7 @@ net.Listener.Accept()
 | `ECHO` | `ECHO <msg>` | `$<len>\r\n<msg>\r\n` |
 | `SET` | `SET <key> <val>` | `+OK\r\n` |
 | `GET` | `GET <key>` | `$<len>\r\n<val>\r\n` or `$-1\r\n` |
+| `DEL` | `DEL [keys...]` | `:<count>\r]n` |
 
 ---
 
@@ -70,3 +71,7 @@ redis-cli -p 6379 get missing
 ```
 
 ---
+
+# License
+
+MIT
