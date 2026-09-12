@@ -123,14 +123,69 @@ func handleClient(conn net.Conn,store *Store){
 			store.mu.Unlock()
 			
 			conn.Write([]byte(fmt.Sprintf(":%d\r\n",deletedCount)))
-	}
+	}else if cmd.name == "EXPIRE" {
+		if len(cmd.args) != 2 {
+			conn.Write([]byte("-ERR wrong number of arguments for 'expire' command\r\n"))
+			continue
+		}
+
+		key := cmd.args[0]
+		seconds,err := strconv.Atoi(cmd.args[1])
+		if err!= nil || seconds < 0{
+			conn.Write([]byte("-ERR value is not an integer or out of range\r\n")) 
+			continue
+		}
+
+		expiresAt := time.Now().Add(time.Duration(seconds) * time.Second)
+
+		store.mu.Lock()
+		entry,exists := store.data[key]
+		if !exists {
+			store.mu.Unlock()
+			conn.Write([]byte(":0\r\n"))
+		}
+		entry.expiresAt = expiresAt
+		store.data[key] = entry
+		store.mu.Unlock()
+
+		conn.Write([]byte(":1\r\n"))
+	}else if cmd.name == "TTL" {
+		if len(cmd.args) != 1 {
+			conn.Write([]byte("-ERR wrong number of arguments for 'TTL' command\r\n"))
+			continue
+		}
+
+		key := cmd.args[0]
+
+		store.mu.RLock()
+		entry,exists:= store.data[key]
+		store.mu.RUnlock()
+		if !exists {
+			conn.Write([]byte(":-2\r\n"))
+			continue
+		}
+		expiresAt := entry.expiresAt
+
+		if !expiresAt.IsZero() && time.Now().After(expiresAt) {
+			store.mu.Lock()
+			delete(store.data, key) 
+			store.mu.Unlock()
+			conn.Write([]byte(":-2\r\n"))
+			continue
+		}
+
+		remaining := int64(time.Until(expiresAt).Seconds())
+		if remaining < 0 {
+			remaining = 0
+		}
+		conn.Write([]byte(fmt.Sprintf(":%d\r\n", remaining)))	
+		} 
 }
 }
 
 func parseCommand(reader *bufio.Reader) ([]string,error){
 	b,err:=reader.ReadByte()
 	if err!=nil{
-		fmt.Print("error at parse command")
 		return nil,err
 	}
 
