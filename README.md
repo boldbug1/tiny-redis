@@ -8,7 +8,8 @@ A minimal in-memory key-value database in Go implementing the core Redis Seriali
 
 * **Concurrency Model:** Goroutine-per-connection pattern using Go's `net` package listening on port `:6379`.
 * **Protocol Parser:** Custom RESP deserializer that reads binary-safe arrays of bulk strings (`*<count>\r\n$<len>\r\n...`) directly from buffered network streams (`bufio.Reader`).
-* **Storage Engine:** Thread-safe in-memory key-value map protected by a reader-writer mutex (`sync.RWMutex`), enabling concurrent reads (`RLock`) and mutually exclusive writes (`Lock`).
+* **Storage Engine:** Thread-safe in-memory store protected by a reader-writer mutex (`sync.RWMutex`). Backed by a `map[string]Entry` storing values alongside expiration timestamps.
+* **Passive Eviction:** Validates key lifetime on access during read operations, purging expired entries on the fly.
 
 ```text
 Clients (redis-cli / nc) 
@@ -17,7 +18,7 @@ Clients (redis-cli / nc)
 net.Listener.Accept() 
        │
        ├─► Goroutine (Client 1) ──► parseCommand() ──┐
-       ├─► Goroutine (Client 2) ──► parseCommand() ──┼─► [sync.RWMutex] map[string]string
+       ├─► Goroutine (Client 2) ──► parseCommand() ──┼─► [sync.RWMutex] map[string]Entry
        └─► Goroutine (Client N) ──► parseCommand() ──┘
 
 ```
@@ -30,9 +31,11 @@ net.Listener.Accept()
 | --- | --- | --- |
 | `PING` | `PING` | `+PONG\r\n` |
 | `ECHO` | `ECHO <msg>` | `$<len>\r\n<msg>\r\n` |
-| `SET` | `SET <key> <val>` | `+OK\r\n` |
+| `SET` | `SET <key> <val> [EX seconds]` | `+OK\r\n` |
 | `GET` | `GET <key>` | `$<len>\r\n<val>\r\n` or `$-1\r\n` |
-| `DEL` | `DEL [keys...]` | `:<count>\r]n` |
+| `DEL` | `DEL <key> [key ...]` | `:<count>\r\n` |
+| `EXPIRE` | `EXPIRE <key> <seconds>` | `:1\r\n` (set) or `:0\r\n` (not found) |
+| `TTL` | `TTL <key>` | `:<seconds>\r\n`, `:-1\r\n` (no TTL), or `:-2\r\n` (missing) |
 
 ---
 
@@ -53,25 +56,25 @@ go build -o tiny-redis main.go
 ### 2. Test with `redis-cli`
 
 ```bash
-# Ping
-redis-cli -p 6379 ping
-
-# Echo
-redis-cli -p 6379 echo "hello world"
-
-# Set a key
+# Basic KV operations
 redis-cli -p 6379 set foo bar
-
-# Get a key
 redis-cli -p 6379 get foo
 
-# Missing key returns (nil)
-redis-cli -p 6379 get missing
+# Set with expiration (seconds)
+redis-cli -p 6379 set session token123 ex 30
+redis-cli -p 6379 ttl session
+
+# Update TTL on an existing key
+redis-cli -p 6379 expire foo 60
+redis-cli -p 6379 ttl foo
+
+# Delete one or more keys
+redis-cli -p 6379 del foo session
 
 ```
 
 ---
 
-# License
+## License
 
 MIT
