@@ -2,4 +2,4 @@
 dist/
 *.test
 *.out
-redis-mini
+tiny-redis
