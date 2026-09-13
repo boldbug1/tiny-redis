@@ -6,9 +6,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -53,12 +55,12 @@ func handleClient(conn net.Conn,store *Store,aof *AOF){
 	for {
 		args,err := parseCommand(reader)
 		if err!=nil{
-			fmt.Errorf("Error in parseCommand\n")
+			fmt.Printf("Error in parseCommand\n")
 			break
 		}
 
 		if len(args) <= 0{
-			fmt.Errorf("Invalid arg lenght\n")
+			fmt.Printf("Invalid arg lenght\n")
 			break
 		}
 
@@ -374,27 +376,47 @@ func main(){
 
 	aof := &AOF{file:file}
 
+	store:= &Store{data: make(map[string]Entry)}
+
+	if err := replayAOF(store, "appendonly.aof"); err != nil {
+		fmt.Printf("AOF replay error: %v\n", err)
+	}
+
+	go startActiveExpiration(store)
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan,os.Interrupt,syscall.SIGTERM)
+
 	listener,err:= net.Listen("tcp",":6379")
 	if err!=nil{
 		fmt.Printf("Error while listening: %v\n",err)
 		return
 	}
 	defer listener.Close()
-	store:= &Store{data: make(map[string]Entry)}
 	fmt.Println("Server running on :6379.....")
 
-	if err := replayAOF(store, "appendonly.aof"); err != nil {
-        fmt.Printf("AOF replay error: %v\n", err)
-    }
 
-	go startActiveExpiration(store)
-
-	for {
-		conn,err:=listener.Accept()
-		if err!=nil{
-			fmt.Printf("Accept error: %v\n",err)
-			continue
+	go func(){
+		for {
+			conn,err:=listener.Accept()
+			if err!=nil{
+				return
+			}
+			go handleClient(conn,store,aof)
 		}
-		go handleClient(conn,store,aof)
-	}
+
+	}()	
+	
+	sig := <-sigChan
+	fmt.Printf("\nReceived signal %v. Shutting down gracefully...\n", sig)
+
+	listener.Close()
+
+	aof.mu.Lock()
+	_ = aof.file.Sync()
+	_ = aof.file.Close()
+	
+	aof.mu.Unlock()
+
+	fmt.Println("State flushed. Goodbye!")
 }
