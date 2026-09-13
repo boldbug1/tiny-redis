@@ -1,15 +1,21 @@
 # tiny-redis
 
-A minimal in-memory key-value database in Go implementing the core Redis Serialization Protocol (RESP).
+A minimal in-memory key-value database in Go implementing the core Redis Serialization Protocol (RESP) with AOF persistence and active key eviction.
 
 ---
 
-## Architecture Overview
+## Technical Details
 
-* **Concurrency Model:** Goroutine-per-connection pattern using Go's `net` package listening on port `:6379`.
-* **Protocol Parser:** Custom RESP deserializer that reads binary-safe arrays of bulk strings (`*<count>\r\n$<len>\r\n...`) directly from buffered network streams (`bufio.Reader`).
-* **Storage Engine:** Thread-safe in-memory store protected by a reader-writer mutex (`sync.RWMutex`). Backed by a `map[string]Entry` storing values alongside expiration timestamps.
-* **Passive Eviction:** Validates key lifetime on access during read operations, purging expired entries on the fly.
+* **Network Model:** Goroutine-per-connection pattern using Go's `net` package listening on port `:6379`.
+* **Protocol Parser:** Custom RESP deserializer reading arrays of bulk strings (`*<count>\r\n$<len>\r\n...`) from a buffered network reader (`bufio.Reader`).
+* **Storage:** In-memory `map[string]Entry` protected by a `sync.RWMutex` for safe concurrent access.
+* **Key Expiration:**
+* **Passive:** Checks expiration on read (`GET`, `TTL`) and evicts immediately if expired.
+* **Active:** Background worker running on a 100ms ticker, sampling keys with an adaptive loop capped at 25ms execution time.
+
+
+* **Durability (AOF):** Mutating commands (`SET`, `DEL`, `EXPIRE`) are appended to `appendonly.aof` in RESP format and replayed into memory on server boot.
+* **Shutdown:** Traps `SIGINT`/`SIGTERM` to stop accepting connections, flush file buffers to disk via `fsync`, and exit cleanly.
 
 ```text
 Clients (redis-cli / nc) 
@@ -19,7 +25,11 @@ net.Listener.Accept()
        │
        ├─► Goroutine (Client 1) ──► parseCommand() ──┐
        ├─► Goroutine (Client 2) ──► parseCommand() ──┼─► [sync.RWMutex] map[string]Entry
-       └─► Goroutine (Client N) ──► parseCommand() ──┘
+       └─► Goroutine (Client N) ──► parseCommand() ──┤          │
+                                                     │          ▼
+                                        (Mutations)  └──► AOF (appendonly.aof)
+                                                                ▲
+                                                         (Startup Replay)
 
 ```
 
@@ -68,8 +78,12 @@ redis-cli -p 6379 ttl session
 redis-cli -p 6379 expire foo 60
 redis-cli -p 6379 ttl foo
 
-# Delete one or more keys
+# Delete keys
 redis-cli -p 6379 del foo session
+
+# Verify persistence
+# Kill the server (Ctrl+C), restart it, and query your keys:
+redis-cli -p 6379 get foo
 
 ```
 
