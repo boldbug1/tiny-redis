@@ -3,3 +3,4 @@ dist/
 *.test
 *.out
 tiny-redis
+*.aof
