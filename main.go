@@ -55,7 +55,9 @@ func handleClient(conn net.Conn, store *Store, aof *AOF) {
 	for {
 		args, err := parseCommand(reader)
 		if err != nil {
-			fmt.Printf("Error in parseCommand\n")
+			if err!=io.EOF{
+				fmt.Printf("Error in parseCommand: %v\n",err)
+			}
 			break
 		}
 
@@ -107,7 +109,12 @@ func handleClient(conn net.Conn, store *Store, aof *AOF) {
 				expiresAt: expiresAt,
 			}
 			store.mu.Unlock()
-			_ = aof.Write(formatRESP(args))
+			_ = aof.Write(formatRESP([]string{"SET", key, value}))
+
+			if !expiresAt.IsZero() {
+				expiresAtMs := strconv.FormatInt(expiresAt.UnixMilli(), 10)
+				_ = aof.Write(formatRESP([]string{"PEXPIREAT", key, expiresAtMs}))
+			}
 			conn.Write([]byte("+OK\r\n"))
 		case "GET":
 			if len(cmd.args) != 1 {
@@ -115,24 +122,23 @@ func handleClient(conn net.Conn, store *Store, aof *AOF) {
 				continue
 			}
 			key := cmd.args[0]
-			store.mu.Lock()
+			store.mu.RLock()
 			entry, exists := store.data[key]
+			store.mu.RUnlock()
 
 			if !exists {
-				store.mu.Unlock()
 				conn.Write([]byte("$-1\r\n"))
 				continue
 
 			}
 
 			if !entry.expiresAt.IsZero() && time.Now().After(entry.expiresAt) {
+				store.mu.Lock()
 				delete(store.data, key)
 				store.mu.Unlock()
 				conn.Write([]byte("$-1\r\n"))
 				continue
 			}
-
-			store.mu.Unlock()
 
 			conn.Write([]byte(fmt.Appendf(nil, "$%d\r\n%s\r\n", len(entry.value), entry.value)))
 		case "DEL":
@@ -182,7 +188,9 @@ func handleClient(conn net.Conn, store *Store, aof *AOF) {
 			entry.expiresAt = expiresAt
 			store.data[key] = entry
 			store.mu.Unlock()
-			_ = aof.Write(formatRESP(args))
+
+			expiresAtMs := strconv.FormatInt(expiresAt.UnixMilli(), 10)
+			_ = aof.Write(formatRESP([]string{"PEXPIREAT", key, expiresAtMs}))
 			conn.Write([]byte(":1\r\n"))
 		case "TTL":
 			if len(cmd.args) != 1 {
@@ -214,6 +222,18 @@ func handleClient(conn net.Conn, store *Store, aof *AOF) {
 				remaining = 0
 			}
 			conn.Write([]byte(fmt.Appendf(nil, ":%d\r\n", remaining)))
+		case "CLIENT":
+            conn.Write([]byte("+OK\r\n"))
+        case "SELECT":
+            conn.Write([]byte("+OK\r\n"))
+        case "CONFIG":
+            param := ""
+            if len(cmd.args) >= 2 {
+                param = cmd.args[1]
+            }
+            conn.Write(fmt.Appendf(nil, "*2\r\n$%d\r\n%s\r\n$0\r\n\r\n", len(param), param))
+        case "COMMAND":
+            conn.Write([]byte("*0\r\n"))
 		default:
 			conn.Write([]byte(fmt.Appendf(nil, "-ERR unknown command '%s'\r\n", cmd.name)))
 		}
@@ -271,7 +291,15 @@ func parseCommand(reader *bufio.Reader) ([]string, error) {
 	}
 
 	if b != '*' {
-		return nil, fmt.Errorf("expected '*' , got %q", b)
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		fullLine := strings.TrimSpace(string(b) + line)
+		if fullLine == "" {
+			return nil, nil
+		}
+		return strings.Fields(fullLine), nil
 	}
 
 	parseString, err := reader.ReadString('\n')
@@ -296,12 +324,12 @@ func parseCommand(reader *bufio.Reader) ([]string, error) {
 		}
 
 		strlen := strings.TrimSpace(line[1:])
-		len, err := strconv.Atoi(strlen)
+		intlen, err := strconv.Atoi(strlen)
 		if err != nil {
 			return nil, err
 		}
 
-		buf := make([]byte, len)
+		buf := make([]byte, intlen)
 		_, err = io.ReadFull(reader, buf)
 		if err != nil {
 			return nil, err
@@ -316,6 +344,7 @@ func parseCommand(reader *bufio.Reader) ([]string, error) {
 }
 
 func replayAOF(store *Store, filename string) error {
+	now := time.Now()
 	file, err := os.Open(filename)
 	if os.IsNotExist(err) {
 		return nil //nothing to restore
@@ -345,12 +374,7 @@ func replayAOF(store *Store, filename string) error {
 			if len(cmdArgs) >= 2 {
 				key := cmdArgs[0]
 				val := cmdArgs[1]
-				var exp time.Time
-				if len(cmdArgs) == 4 && strings.ToUpper(cmdArgs[2]) == "EX" {
-					secs, _ := strconv.Atoi(cmdArgs[3])
-					exp = time.Now().Add(time.Duration(secs) * time.Second)
-				}
-				store.data[key] = Entry{value: val, expiresAt: exp}
+				store.data[key] = Entry{value: val}
 			}
 
 		case "DEL":
@@ -358,13 +382,18 @@ func replayAOF(store *Store, filename string) error {
 				delete(store.data, k)
 			}
 
-		case "EXPIRE":
+		case "PEXPIREAT":
 			if len(cmdArgs) == 2 {
 				key := cmdArgs[0]
-				if entry, exists := store.data[key]; exists {
-					secs, _ := strconv.Atoi(cmdArgs[1])
-					entry.expiresAt = time.Now().Add(time.Duration(secs) * time.Second)
-					store.data[key] = entry
+				ms, err := strconv.ParseInt(cmdArgs[1], 10, 64)
+				if err == nil {
+					exp := time.UnixMilli(ms)
+					if now.After(exp) {
+						delete(store.data, key)
+					} else if entry, exists := store.data[key]; exists {
+						entry.expiresAt = exp
+						store.data[key] = entry
+					}
 				}
 			}
 		}
